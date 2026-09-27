@@ -453,6 +453,15 @@ def main() -> None:
     args = build_parser().parse_args()
 
     b = BEHAVIORS[args.behavior]
+    # Also resolve here: recipe hot reload works with an already-running lab,
+    # and direct CLI training must not silently train a prerequisite from zero.
+    if args.init_from is None and b.warm_start_behavior:
+        from .training_init import resolve_prerequisite
+        try:
+            args.init_from = str(resolve_prerequisite(b, RUNS_DIR))
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        print(f"{b.id}: inheriting {args.init_from}", flush=True)
     # Resolved BEFORE anything is written or built: behavior.json, the warm-start
     # path and the fresh-model path must all agree on one number.
     symmetry_coef = symmetry_coef_for(b, args.symmetry_coef)
@@ -474,7 +483,16 @@ def main() -> None:
          "symmetry_coef": symmetry_coef, "desired_kl": args.desired_kl,
          "net_arch": args.net_arch, "shared_trunk": args.shared_trunk,
          "n_epochs": args.n_epochs,
-         "clip": resolve_clip_name(b)}))
+         "clip": resolve_clip_name(b),
+         "init_from": args.init_from, "seed": args.seed,
+         "env_overrides": {k: v for k, v in os.environ.items()
+                           if k.startswith("MICRODUCK_") and k in {
+                               "MICRODUCK_ACTUATOR", "MICRODUCK_BAM_CURRENT_SCALE",
+                               "MICRODUCK_INVERTED_SPAWN_PROB", "MICRODUCK_MID_FLIP_SPAWN_PROB",
+                               "MICRODUCK_INV_SPAWN_KICK", "MICRODUCK_HS_GATE",
+                               "MICRODUCK_LAUNCH_YAW_KICK", "MICRODUCK_LAUNCH_TURNS",
+                               "MICRODUCK_LAUNCH_SUPPORT_GAP",
+                               "MICRODUCK_EPISODE_S"}}}))
 
     # Fork workers BEFORE importing torch. A torch-initialized parent has
     # OpenMP/Accelerate thread pools; forking them deadlocks on macOS.
@@ -579,6 +597,12 @@ def main() -> None:
         model = SymmetryPPO.load(
             str(prev / "model.zip"), env=venv, device="cpu",
             custom_objects={"policy_class": FastActorCriticPolicy})
+        if b.id == "headspin_launch":
+            donor_meta = json.loads((prev / "behavior.json").read_text())
+            if donor_meta.get("behavior") != b.id:
+                from .training_init import initialize_launch_commands
+                layers = initialize_launch_commands(model, venv)
+                print(f"Initialized launch command slots in {layers} donor layers", flush=True)
         # This launch is the authority (same rule as symmetry_coef below); a
         # checkpoint from before the attribute existed carries nothing.
         model.overlap_update = args.overlap

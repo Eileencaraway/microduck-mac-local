@@ -1,5 +1,11 @@
 # Microduck Lab 🦆: RL experimentation on your Mac
 
+> **This branch contains an experimental Microduck headspin prototype.**
+> Read the [English experiment README](microduck_local/docs/headspin-experiment/README.md)
+> or the [中文实验说明](microduck_local/docs/headspin-experiment/README.zh-CN.md).
+> The behavior is a simulation research prototype; a reliable full turn and
+> physical-robot deployment have not been demonstrated.
+
 Train reinforcement-learning policies for the
 [Microduck](https://pollen-robotics.com/microduck), Pollen Robotics'
 open-source ~25 cm bipedal robot, **on an ordinary Apple Silicon Mac with no

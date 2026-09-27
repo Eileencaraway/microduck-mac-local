@@ -774,6 +774,378 @@ _register(Behavior(
 
 
 
+# ------------------------------------------------------------------ headspin
+# Experimental extension of the measured headstand, not a solved skill.
+# Keep the same hold/entry rewards: only spawns get easier across the ladder.
+
+def _headspin_world_rate(env) -> float:
+    """World-up angular speed from two observable body-frame vectors.
+
+    gyro_z alone reverses sign upside down. -gravity is world UP expressed
+    in the same frame as the gyro (obs[0:3], obs[3:6]).
+    """
+    return float(np.dot(env._gyro, -env._projected_gravity()))
+
+
+def _headspin_supported(env) -> bool:
+    c = env.foot_contact_state
+    return (not c['left'] and not c['right']
+            and _head_on_floor(env) and _body_floor_contacts(env) == 0
+            and float(env._projected_gravity()[2]) > 0.8
+            and _headstand_hold_raw(env) > 0.05)
+
+
+def _headspin_turn(env) -> float:
+    """Signed, bounded rotation income; stillness pays zero, reverse costs.
+
+    Limit progress pay at the target so violent spins earn no extra. Count
+    only a supported stack, never standing spins, face slides or somersaults.
+    """
+    if not _headspin_supported(env):
+        return 0.0
+    return float(np.clip(_headspin_world_rate(env) / 0.6, -1.0, 1.0))
+
+
+def _headspin_visible(env) -> float:
+    """Bounded speed-band reward: visibly turn, rather than merely balance.
+
+    Baseline-subtracted Gaussian: zero at rest (and reverse), maximum at
+    1.2 rad/s, decaying at excessive speeds. Uses only current observable
+    angular velocity and support; no hidden angle/clock is rewarded.
+    """
+    if not _headspin_supported(env):
+        return 0.0
+    rate = _headspin_world_rate(env)
+    baseline = float(np.exp(-((1.2 / 0.8) ** 2)))
+    match = float(np.exp(-(((rate - 1.2) / 0.8) ** 2)))
+    return max(0.0, (match - baseline) / (1.0 - baseline))
+
+
+def _headspin_overspeed(env) -> float:
+    if not _headspin_supported(env):
+        return 0.0
+    # The visible-speed recipe needs headroom around its 1.2 rad/s target.
+    # Setting the new slider to zero retains the original 0.9 knee.
+    visible_weight = env.weight_overrides.get('headspin_visible', 6.0)
+    knee = 1.8 if visible_weight > 0 else 0.9
+    excess = max(0.0, abs(_headspin_world_rate(env)) - knee)
+    return -min(1.0, excess * excess)
+
+
+def _headspin_reset(env) -> None:
+    env._headspin_net = 0.0
+    env._headspin_bout = 0.0
+    env._headspin_best = 0.0
+    env._headspin_supported_s = 0.0
+
+
+def _headspin_update(env) -> None:
+    _hs_update(env)
+    if _headspin_supported(env):
+        delta = _headspin_world_rate(env) * C.CTRL_DT
+        env._headspin_net += delta
+        env._headspin_bout += delta
+        env._headspin_supported_s += C.CTRL_DT
+        env._headspin_best = max(env._headspin_best, env._headspin_bout)
+    else:
+        env._headspin_bout = 0.0
+
+
+def _headspin_caption(env) -> str:
+    return (f"headspin {np.degrees(getattr(env, '_headspin_net', 0)):+.0f}deg "
+            f"{_headspin_world_rate(env):+.2f}rad/s")
+
+
+def _headspin_report(env) -> list[str]:
+    return [
+        f"headspin: supported net {np.degrees(env._headspin_net):+.1f} deg; "
+        f"best uninterrupted directed rotation {np.degrees(env._headspin_best):.1f} deg; "
+        f"head-only stacked support {env._headspin_supported_s:.2f} s",
+        "Experimental proxy: jaw_soft is one body; visually verify crown contact. "
+        "A spawned inverted start does not demonstrate entry from standing.",
+    ]
+
+
+_register(replace(
+    BEHAVIORS['headstand'],
+    id='headspin', emoji='🌀', title='Do a headspin',
+    description='Enter a headstand, then rotate slowly on the crown with both feet off the floor.',
+    how_it_learns=(
+        'Starts from a completed headstand model. Keep the headstand while turning '
+        'around world-up, with visible-spin pay targeting 1.2 rad/s (about 5 s/turn). Only head-supported inverted turns earn '
+        'rotation points; reverse turns subtract points and excess speed costs. '
+        'This experimental recipe trains continuous rotation, not a stop-and-stand finish.'),
+    keywords=('headspin', 'head spin', 'spin on its head', 'spin on your head',
+              '头顶旋转', '头顶接地旋转', '头转'),
+    terms=BEHAVIORS['headstand'].terms + (
+        RewardTerm('headspin_turn', 'Points for slow directed rotation while balanced on the head',
+                   3.0, _headspin_turn),
+        RewardTerm('headspin_visible', 'Visible headspin: turn at about 1.2 rad/s (one turn in 5 seconds)',
+                   6.0, _headspin_visible),
+        RewardTerm('headspin_overspeed', 'Penalty for spinning too fast on the head',
+                   1.0, _headspin_overspeed, is_penalty=True),
+    ),
+    # Fixed world-up direction; retain the donor's zero command inputs.
+    # This is intentionally not mirror-symmetric.
+    symmetric=False,
+    warm_start_behavior='headstand',
+    default_steps=3_000_000, episode_s=12.0,
+    success_metric='uninterrupted signed head-supported rotation, evaluated from standing',
+    state_fn=_headspin_update, reset_fn=_headspin_reset, obs_fn=None,
+    caption_fn=_headspin_caption, report_fn=_headspin_report,
+    inverted_spawn_prob=0.45, mid_flip_spawn_prob=0.40,
+    curriculum=tuple(
+        CurriculumStage(label, 1_000_000, {
+            'MICRODUCK_ACTUATOR': 'bam',
+            'MICRODUCK_INVERTED_SPAWN_PROB': inv,
+            'MICRODUCK_MID_FLIP_SPAWN_PROB': mid,
+            'MICRODUCK_INV_SPAWN_KICK': kick,
+            'MICRODUCK_HS_GATE': '0.8',
+            'MICRODUCK_EPISODE_S': '12',
+        }, detail=detail)
+        for label, inv, mid, kick, detail in (
+            ('slow turns from a balanced headstand', '0.85', '0.10', '0.05',
+             '85% inverted starts, 10% entry practice, 5% standing. Retain balance while discovering slow rotation.'),
+            ('keeping the turn through disturbances', '0.70', '0.20', '0.15',
+             '70% inverted, 20% mid-entry, 10% standing; larger initial disturbances, unchanged motor strength.'),
+            ('entering the headspin from standing', '0.45', '0.40', '0.15',
+             '45% inverted, 40% mid-entry, 15% standing. Evaluate the finished policy separately using standing-only starts.'),
+        )
+    ),
+))
+
+
+# ------------------------------------------------------- foot-driven headspin
+# A separate experiment.  Curriculum-only inverted starts may receive a yaw
+# kick so the policy can first learn to KEEP a head-supported turn.  The final
+# stage and deterministic evaluation remain standing-only with zero kick.
+_LAUNCH_TURNS = 1.0
+_LAUNCH_RATE = 4.0                 # rad/s; experimental target, not measured ability
+_LAUNCH_LZ = 0.015                # kg m^2/s; launch shaping reference
+
+
+def _launch_lz(env):
+    # Recompute rather than reading potentially stale subtree velocity caches.
+    mujoco.mj_subtreeVel(env.model, env.data)
+    return float(env.data.subtree_angmom[env.trunk_body_id, 2])
+
+
+def _launch_foot_torque(env):
+    """World-z ground moment about whole-body COM, FOOT contacts only.
+
+    Sampled at control frequency; an impulse proxy, not substep-exact accounting.
+    Contact frame rows are world axes; mj_contactForce acts on geom2.
+    """
+    torque = 0.0
+    com = env.data.subtree_com[env.trunk_body_id]
+    feet = set(env.foot_geoms.values())
+    force = np.zeros(6)
+    for i in range(env.data.ncon):
+        contact = env.data.contact[i]
+        g1, g2 = int(contact.geom1), int(contact.geom2)
+        if g1 == env.floor_geom and g2 in feet:
+            sign = 1.0
+        elif g2 == env.floor_geom and g1 in feet:
+            sign = -1.0
+        else:
+            continue
+        mujoco.mj_contactForce(env.model, env.data, i, force)
+        frame = contact.frame.reshape(3, 3)
+        world_force = sign * (frame.T @ force[:3])
+        world_torque = sign * (frame.T @ force[3:])
+        torque += float(np.cross(contact.pos - com, world_force)[2] + world_torque[2])
+    return torque
+
+
+def _launch_reset(env):
+    env._ls_target_turns = float(np.clip(
+        float(_spawn_knob(env, "MICRODUCK_LAUNCH_TURNS", str(_LAUNCH_TURNS))), .125, 5.0))
+    env._ls_support_gap_max = float(np.clip(
+        float(_spawn_knob(env, "MICRODUCK_LAUNCH_SUPPORT_GAP", "0.6")), .1, 1.5))
+    yaw_kick = max(0.0, float(_spawn_knob(env, "MICRODUCK_LAUNCH_YAW_KICK", "0")))
+    assisted = env.last_spawn != 'standing' and yaw_kick > 0
+    if env.last_spawn == 'standing':
+        # The real launch test always begins motionless.  Reverse-curriculum
+        # spawns keep their entry velocity and can add a declared yaw kick.
+        env.data.qvel[:] = 0.0
+    elif assisted:
+        env.data.qvel[5] += yaw_kick * env._rng.uniform(.85, 1.0)
+    mujoco.mj_forward(env.model, env.data)
+    env._ls_phase = 1 if env.last_spawn == 'inverted' and assisted else 0
+    env._ls_time = env._ls_turn = env._ls_head_turn = 0.0
+    env._ls_quality = env._ls_takeoff_lz = env._ls_peak_lz = 0.0
+    env._ls_launch_gain = env._ls_spin_gain = 0.0
+    env._ls_gap = env._ls_settled = 0.0
+    env._ls_foot_impulse = 0.0
+    env._ls_prev_lz = _launch_lz(env)
+    env._ls_prev_feet = False
+    env._ls_foot_seen = assisted
+    # Assisted starts explicitly expose their training wheel in the command
+    # observation.  Standing starts must still earn quality from foot impulse.
+    env._ls_quality = 1.0 if assisted else 0.0
+    env._ls_success = False
+    env._ls_head_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, 'jaw_soft')
+    env._ls_head_velocity = np.zeros(6)
+
+
+def _launch_update(env):
+    _hs_update(env)
+    env._ls_time += C.CTRL_DT
+    feet = any(env.foot_contact_state.values())
+    lz = _launch_lz(env)
+    env._ls_launch_gain = env._ls_spin_gain = 0.0
+    if feet:
+        env._ls_foot_seen = True
+    if env._ls_phase == 0:
+        # Only new angular-momentum records during FOOT contact earn pay.
+        # Bounded total launch pay; repeatedly winding/unwinding cannot farm it.
+        if feet and env._ls_time <= 3.0:
+            env._ls_foot_impulse += _launch_foot_torque(env) * C.CTRL_DT
+            clipped = float(np.clip(min(lz, env._ls_foot_impulse), 0, _LAUNCH_LZ))
+            env._ls_launch_gain = max(0, clipped - env._ls_peak_lz) / _LAUNCH_LZ
+            env._ls_peak_lz = max(env._ls_peak_lz, clipped)
+        if env._ls_prev_feet and not feet:
+            # Use the LAST foot-contact value, not post-takeoff neck/leg motion.
+            env._ls_takeoff_lz = env._ls_prev_lz
+            env._ls_quality = float(np.clip(min(env._ls_takeoff_lz, env._ls_foot_impulse) / _LAUNCH_LZ, 0, 1))
+            if env._ls_foot_impulse < 0.6 * max(0, env._ls_takeoff_lz):
+                env._ls_quality = 0.0
+        if _headspin_supported(env) and env._ls_foot_seen:
+            env._ls_phase = 1
+        elif env._ls_time > 4.0:
+            env._ls_phase = 2
+    elif env._ls_phase == 1:
+        if _headspin_supported(env):
+            env._ls_gap = 0.0
+            old = min(env._ls_turn, env._ls_head_turn)
+            env._ls_turn += _headspin_world_rate(env) * C.CTRL_DT
+            mujoco.mj_objectVelocity(env.model, env.data, mujoco.mjtObj.mjOBJ_BODY,
+                                    env._ls_head_id, env._ls_head_velocity, 0)
+            env._ls_head_turn += float(env._ls_head_velocity[2]) * C.CTRL_DT
+            # Both HEAD and TRUNK must rotate: neck-only twisting cannot finish.
+            new = min(env._ls_turn, env._ls_head_turn)
+            env._ls_spin_gain = float(np.clip((new - old) / (_LAUNCH_RATE * C.CTRL_DT), -1, 1))
+            if new >= env._ls_target_turns * 2 * np.pi:
+                env._ls_phase = 2
+        else:
+            env._ls_gap += C.CTRL_DT
+            if env._ls_gap > env._ls_support_gap_max:
+                env._ls_phase = 2   # no sum of disconnected half-turn attempts
+        if env._ls_time > 10.0:
+            env._ls_phase = 2
+    if env._ls_phase == 2:
+        flat = abs(float(env._projected_gravity()[2])) < 0.35
+        quiet = float(np.linalg.norm(env._gyro)) < 0.5
+        grounded = _body_floor_contacts(env) > 0
+        env._ls_settled = env._ls_settled + C.CTRL_DT if flat and quiet and grounded else 0.0
+        env._ls_success = (min(env._ls_turn, env._ls_head_turn) >= env._ls_target_turns * 2 * np.pi
+                           and env._ls_quality >= 0.5 and env._ls_settled >= 0.5)
+    env._ls_prev_lz, env._ls_prev_feet = lz, feet
+
+
+def _launch_obs(env):
+    if not hasattr(env, '_ls_phase'):
+        return
+    # Six task commands (55:61), not a changed observation/action layout.
+    # Contact/whole-body momentum are simulator-derived task-controller signals;
+    # hardware would need estimators. This is a local simulation experiment.
+    progress = min(env._ls_turn, env._ls_head_turn) / (env._ls_target_turns * 2 * np.pi)
+    env.body_cmd[:] = [env._ls_phase / 2, np.clip(1 - progress, -1, 1),
+                       min(env._ls_time / 12, 1), env._ls_quality,
+                       np.clip(_launch_lz(env) / _LAUNCH_LZ, -2, 2),
+                       float(any(env.foot_contact_state.values()))]
+
+
+def _launch_entry_term(fn):
+    def gated(env):
+        # Keep the donor's balance skill alive through the spin.  It switches
+        # off only for recovery, where indefinite headstanding must not win.
+        return fn(env) if env._ls_phase != 2 else 0.0
+    return gated
+
+
+def _launch_push(env):
+    return env._ls_launch_gain
+
+
+def _launch_spin(env):
+    return env._ls_quality * env._ls_spin_gain
+
+
+def _launch_balance(env):
+    if env._ls_phase != 1:
+        return 0.0
+    return _headstand_hold_raw(env) * env._ls_quality
+
+
+def _launch_settle(env):
+    if env._ls_phase != 2:
+        return 0.0
+    progress = float(np.clip(min(env._ls_turn, env._ls_head_turn) / (env._ls_target_turns * 2 * np.pi), 0, 1))
+    flat = max(0, 1 - abs(float(env._projected_gravity()[2])))
+    calm = float(np.exp(-float(np.dot(env._gyro, env._gyro))))
+    return progress * env._ls_quality * flat * calm * float(_body_floor_contacts(env) > 0)
+
+
+def _launch_overspeed(env):
+    return -min(1, max(0, abs(_headspin_world_rate(env)) - 7.0) ** 2)
+
+
+def _launch_caption(env):
+    phase = ('push', 'spin', 'recover')[getattr(env, '_ls_phase', 0)]
+    turns = min(getattr(env, '_ls_turn', 0), getattr(env, '_ls_head_turn', 0)) / (2 * np.pi)
+    target = getattr(env, '_ls_target_turns', _LAUNCH_TURNS)
+    return f'{phase}: {turns:.2f}/{target:g} turns; foot launch {getattr(env, "_ls_takeoff_lz", 0):.4f} kg m2/s'
+
+
+def _launch_report(env):
+    return [_launch_caption(env), f'proxy_success={env._ls_success}; settled={env._ls_settled:.2f}s',
+            'No externally injected spin. Head/trunk world-up gyro integrals are proxies; verify video.']
+
+
+_register(replace(
+    BEHAVIORS['headstand'], id='headspin_launch', emoji='🌀', title='Foot-driven headspin',
+    description='Push and twist from the feet, spin on the head, then settle lying down.',
+    how_it_learns='Warm-starts from the trained headspin. Reverse curriculum first preserves a short assisted turn, then removes the assist and finishes from a motionless standing start. Experimental: success has not been demonstrated.',
+    keywords=('headspin_launch', 'foot-driven headspin', '撑地启动头转', '撑地头转'),
+    terms=tuple(replace(t, fn=_launch_entry_term(t.fn)) for t in BEHAVIORS['headstand'].terms) + (
+        RewardTerm('launch_push', 'Build initial rotation while the feet still push on the floor', 24.0, _launch_push),
+        RewardTerm('launch_spin', 'Carry launch momentum through the requested head-supported turn', 24.0, _launch_spin),
+        RewardTerm('launch_balance', 'Keep the headstand while rotating after the launch', 8.0, _launch_balance),
+        RewardTerm('launch_settle', 'After rotating, slow down and settle lying flat', 12.0, _launch_settle),
+        RewardTerm('launch_overspeed', 'Penalty for excessive rotation above 7 rad/s', 2.0, _launch_overspeed, is_penalty=True),
+    ),
+    warm_start_behavior='headspin', symmetric=False, default_steps=3_000_000,
+    episode_s=10.0, inverted_spawn_prob=0.0, mid_flip_spawn_prob=0.0,
+    curriculum=tuple(
+        CurriculumStage(label, 750_000, {
+            'MICRODUCK_ACTUATOR': 'bam', 'MICRODUCK_BAM_CURRENT_SCALE': '1.0',
+            'MICRODUCK_INVERTED_SPAWN_PROB': inv,
+            'MICRODUCK_MID_FLIP_SPAWN_PROB': mid,
+            'MICRODUCK_INV_SPAWN_KICK': entry_kick,
+            'MICRODUCK_LAUNCH_YAW_KICK': yaw_kick,
+            'MICRODUCK_LAUNCH_TURNS': turns,
+            'MICRODUCK_LAUNCH_SUPPORT_GAP': '0.6',
+            'MICRODUCK_HS_GATE': '0.8', 'MICRODUCK_EPISODE_S': episode,
+        }, detail=detail)
+        for label, inv, mid, entry_kick, yaw_kick, turns, episode, detail in (
+            ('preserve a quarter-turn from head support', '0.85', '0.10', '0.05', '1.5', '0.25', '8',
+             'Start from the trained headspin pose with a visible yaw kick; retain balance for one quarter-turn.'),
+            ('carry a half-turn through entry', '0.65', '0.25', '0.10', '1.0', '0.5', '8',
+             'Reduce the yaw assist and add more mid-entry and standing starts; target one half-turn.'),
+            ('transfer three-quarter-turn momentum', '0.30', '0.30', '0.10', '0.5', '0.75', '10',
+             'Standing starts become the largest group while the remaining assisted starts preserve the spin skill.'),
+            ('motionless foot launch for one turn', '0', '0', '0', '0', '1.0', '10',
+             'Final stage starts motionless on the feet with no injected yaw or inverted spawn.'),
+        )
+    ),
+    spawn_families=(), spotter_fn=None,
+    state_fn=_launch_update, reset_fn=_launch_reset, obs_fn=_launch_obs,
+    caption_fn=_launch_caption, report_fn=_launch_report,
+    success_metric='standing start, positive foot-contact launch momentum, one continuous head AND trunk turn, then 0.5 seconds settled lying down',
+))
+
+
 # Star-export EVERYTHING (helpers included) so downstream modules and the
 # package __init__ can reassemble the old flat-module surface exactly.
 __all__ = [n for n in dir() if not n.startswith("__")]

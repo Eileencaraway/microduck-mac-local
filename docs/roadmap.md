@@ -1328,6 +1328,21 @@ MuJoCo contacts between duck and basket, peak forward gravity, landing.
 
 ## Later / parked
 
+### 2026-09-23: headspin donor and reverse curriculum
+
+The standing-only launch experiment converged on the launch proxy while
+deterministic rollouts still produced no full turn. Revised `headspin_launch`
+to warm-start from `teach-headspin-f95723`, keep the inherited headstand terms
+active during supported rotation, allow 0.6 s contact gaps, and reduce the
+initial target from two turns to one. Four equal stages remove an explicit yaw
+kick while increasing standing starts: 0.25, 0.5, 0.75, then 1.0 turn; the
+last stage is 100% motionless standing with zero assist. Launch shaping weight
+dropped 60→24; spin/balance rose 16→24 and 3→8. Started chain
+`teach-headspin_launch-e743c8` from the trained headspin donor. Early assisted
+stages are curriculum only; success still requires deterministic standing-only
+evaluation plus visual review.
+
+
 - **Port `find_ball` to an mjlab cfg** and retrain on GPU in upstream
   `microduck_rl`. That stack, not this one, is the sim2real recipe. Blocked on
   the items above: there is no point porting a recipe whose back-bucket
@@ -1369,3 +1384,32 @@ MuJoCo contacts between duck and basket, peak forward gravity, landing.
   wants precise bearing for gaze and following) or "find the charging dock".
   A second target is a cheap test of whether the recipe generalizes or whether
   it memorized a ball-sized blob.
+
+### 2026-09-23: headspin recipe and first local experiment
+
+Added experimental `headspin`, inherited from a completed headstand; same hold
+rewards plus signed, head-supported world-up rotation and overspeed penalty.
+Three 1M-step spawn-curriculum stages; BAM motors unchanged; fixed direction,
+mirror loss off. Browser recognition and prerequisite inheritance verified.
+See `microduck_local/docs/headspin.md` and `scripts/eval_headspin.py`.
+
+Measured donor `teach-headstand-44d48a-s5`, deterministic, 12 s, seeds 100–102:
+standing starts had 8.06–10.76 s valid supported stack, but no uninterrupted full
+turn in the requested direction (best 0–61.19 degrees). Inverted starts likewise
+had no continuous full turn (best 96.38–227.14 degrees). This is a diagnostic
+baseline, not a success-rate claim. First training chain: `teach-headspin-47cbc4`.
+The answer to whether fine-tuning improves this will come from the same battery
+and visual inspection; merely adding the recipe is not a solved headspin.
+
+Stage-1 diagnostic (`teach-headspin-47cbc4-s1`, same seeds/settings): standing-start
+best continuous rotation 333.54/467.35/143.47 deg, proxy full turn 1/3. Inverted
+starts 433.90/360.43/85.02 deg, proxy full turn 2/3. Supported mean rates from
+standing 2.93/4.72/1.32 rad/s exceed the 0.6 target, and longest support shrank to
+1.52/1.36/1.18 s. Directional turning appeared; stable slow headspin is NOT solved.
+Keep this initial chain unchanged, then compare a speed-tracking objective only
+with paired support/turn metrics and visual review.
+
+
+### 2026-09-23: foot-driven headspin launched
+
+Implemented separate `headspin_launch` with foot-ground impulse proxy, finite two-turn state, recovery, task observations and donor input adaptation. Started `teach-headspin_launch-5c5536-s1`, 3M, BAM1.0, motionless standing starts only. Related tests passed; first two deterministic live-policy probes did not succeed (negative foot impulse, zero launch quality). Training is running; this is not a solved skill. See `microduck_local/docs/headspin-launch.md` and evaluate final ONNX with `scripts/eval_headspin_launch.py`, then inspect visually.

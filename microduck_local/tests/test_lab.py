@@ -1446,6 +1446,9 @@ def test_teach_text_is_the_behavior_id(fake_popen, monkeypatch, tmp_path):
     # Every other card id round-trips too — the panel special-cases nothing.
     for b in B.BEHAVIORS.values():
         out = asyncio.run(teach(V.TeachReq(text=b.id)))
+        if b.warm_start_behavior:
+            assert not out["matched"] and b.warm_start_behavior in out["message"]
+            continue
         assert out["matched"] and out["job"]["behavior"]["id"] == b.id, b.id
         asyncio.run(stop())
 

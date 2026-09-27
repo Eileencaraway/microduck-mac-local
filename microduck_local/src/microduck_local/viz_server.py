@@ -1856,6 +1856,11 @@ def resolve_stage_init(behavior_id: str, start_stage: int) -> Path:
     return max(candidates, key=lambda d: (d / "model.zip").stat().st_mtime)
 
 
+def resolve_prerequisite_init(behavior) -> Path | None:
+    from .training_init import resolve_prerequisite
+    return resolve_prerequisite(behavior, RUNS_DIR)
+
+
 def run_trained_weights(run: Path) -> dict[str, float]:
     """The reward weights a finished run ACTUALLY trained under — its
     behavior.json (written by train_behavior before the first step, and the
@@ -3165,6 +3170,11 @@ def make_app(ducks: list[Duck]):
         elif start_stage > 1:
             try:
                 stage_init = resolve_stage_init(b.id, start_stage)
+            except ValueError as e:
+                return {"matched": False, "message": str(e)}
+        elif init_from is None and b.warm_start_behavior:
+            try:
+                stage_init = resolve_prerequisite_init(b)
             except ValueError as e:
                 return {"matched": False, "message": str(e)}
         # Sticky sliders: no weights in the request means "same as I had it",

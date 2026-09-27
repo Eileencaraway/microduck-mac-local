@@ -77,6 +77,8 @@ class Behavior:
     # False here defaults --symmetry-coef to 0 (train_behavior.symmetry_coef_for);
     # an explicit --symmetry-coef still wins, in both directions.
     symmetric: bool = True
+    # Optional prerequisite for browser-launched curricula. Explicit initFrom wins.
+    warm_start_behavior: str | None = None
     # Training episode length. Static hold-a-pose tricks want LONG episodes:
     # with 8 s clips + gamma 0.99 (~2 s effective horizon) a policy is never
     # economically pressured toward a true stationary equilibrium — it just

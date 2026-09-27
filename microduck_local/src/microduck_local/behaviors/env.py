@@ -105,6 +105,11 @@ class BehaviorEnv(MicroduckWalkEnv):
         if self.spotter:
             self.spotter_active = bool(self.behavior.spotter_fn(self))
         obs, reward, terminated, truncated, info = super().step(action)
+        if self.behavior.id == "headspin_launch":
+            # Parent assembles obs before reward/state hooks. Deliver THIS
+            # transition's phase/progress rather than a one-step-old command.
+            self.behavior.obs_fn(self)
+            obs[55:61] = self.body_cmd
         # NO overshoot terminal for the headstand (removed 2026-09-01). The
         # gx < -0.2 terminal (added so mid-flip catches that rolled past
         # wouldn't spend the clip getting up) priced every UNFOLD attempt at

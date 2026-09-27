@@ -58,5 +58,7 @@ microduck_local/farm-state.json
 microduck_local/farm-server.log
 # backend log (restart.sh writes it)
 microduck_local/lab-server.log
+# Local assistant/session scratch file; never part of an experiment record.
+microduck_local/:memory:.ses
 # viewer log (viewer.sh writes it)
 duck-viewer/viewer-server.log
