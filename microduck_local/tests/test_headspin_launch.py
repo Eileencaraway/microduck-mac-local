@@ -59,9 +59,11 @@ def test_foot_push_is_bounded_and_takeoff_quality_is_retained(env, monkeypatch):
     assert env._ls_quality == pytest.approx(1)
 
 
-def test_neck_twist_cannot_complete_but_two_whole_turns_can(env, monkeypatch):
-    env._ls_phase, env._ls_quality = 1, 1.
-    env._ls_target_turns = 2.0
+def test_neck_twist_cannot_complete_but_one_whole_turn_succeeds(env, monkeypatch):
+    # Per the user-facing contract, a continuous turn is success even when
+    # the separate 50 Hz foot-impulse proxy does not certify launch quality.
+    env._ls_phase, env._ls_quality = 1, 0.
+    env._ls_target_turns = 4.0
     monkeypatch.setattr(H, '_headspin_supported', lambda e: True)
     monkeypatch.setattr(H, '_headspin_world_rate', lambda e: 4.)
     def head_still(*args):
@@ -75,12 +77,28 @@ def test_neck_twist_cannot_complete_but_two_whole_turns_can(env, monkeypatch):
     def head_rotates(*args):
         args[-2][:] = [0, 0, 4, 0, 0, 0]
     monkeypatch.setattr(H.mujoco, 'mj_objectVelocity', head_rotates)
-    for _ in range(158):
+    for _ in range(79):
+        H._launch_update(env)
+    assert env._ls_phase == 1
+    assert min(env._ls_turn, env._ls_head_turn) >= 2 * np.pi
+    assert env._ls_success
+
+    for _ in range(236):
         H._launch_update(env)
     assert env._ls_phase == 2
-    assert min(env._ls_turn, env._ls_head_turn) >= 4 * np.pi
-    assert not env._ls_success  # spinning is not a settled finish
+    assert min(env._ls_turn, env._ls_head_turn) >= 8 * np.pi
+    assert env._ls_success
     assert all(t.fn(env) == 0 for t in env.behavior.terms[:len(B.BEHAVIORS['headstand'].terms)])
+
+
+def test_later_turns_pay_more_without_a_settle_reward(env):
+    env._ls_phase, env._ls_quality, env._ls_spin_gain = 1, 1.0, 0.5
+    env._ls_turn = env._ls_head_turn = 0.25 * 2 * np.pi
+    first = H._launch_spin(env)
+    env._ls_turn = env._ls_head_turn = 3.25 * 2 * np.pi
+    fourth = H._launch_spin(env)
+    assert fourth > first > 0
+    assert 'launch_settle' not in {t.key for t in env.behavior.terms}
 
 
 def test_lost_support_does_not_bank_disconnected_turns(env, monkeypatch):
@@ -102,7 +120,7 @@ def test_reverse_curriculum_exposes_assist_and_preserves_spin_rewards():
         e.reset(seed=7)
         assert e.last_spawn == 'inverted'
         assert e._ls_phase == 1 and e._ls_quality == 1
-        assert e._ls_target_turns == .25
+        assert e._ls_target_turns == .5
         assert e.data.qvel[5] > 1.0
         # The headstand donor's terms remain active during the spin phase.
         assert any(t.fn(e) != 0 for t in e.behavior.terms[:len(B.BEHAVIORS['headstand'].terms)])
@@ -120,6 +138,6 @@ def test_final_stage_is_motionless_and_unassisted():
         assert e.last_spawn == 'standing'
         assert np.all(e.data.qvel == 0)
         assert e._ls_phase == 0 and e._ls_quality == 0
-        assert e._ls_target_turns == 1
+        assert e._ls_target_turns == 4
     finally:
         e.close()

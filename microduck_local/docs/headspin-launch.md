@@ -87,3 +87,33 @@ visual evaluation.
 Revision run: `teach-headspin_launch-e743c8`, explicitly initialized from
 `teach-headspin-f95723`. Do not compare its assisted early-stage reward as a
 success rate for the final standing task.
+
+## Fast multi-turn revision — 2026-09-27
+
+The user's desired finish is now unconstrained: falling flat, remaining
+inverted, or returning to the feet are all acceptable after the spin. Success
+means at least one continuous, positive turn by both head and trunk. Foot-launch
+quality remains a separately reported diagnostic and reward multiplier, rather
+than a second success gate. There is no recovery-pose or settling requirement
+and the `launch_settle` reward was removed.
+
+The curriculum now targets 0.5, 1, 2, and 4 turns. Its final stage is still an
+honest motionless standing start with no yaw injection. The dense
+`launch_spin` reward is normalized at 5 rad/s and grows from a 1x multiplier
+near takeoff to 2x during the fourth turn; therefore one turn passes, while
+continuing through turns two to four remains the better solution. The
+overspeed penalty begins above 8 rad/s.
+
+Training chain `teach-headspin_launch-5cc39d` warm-starts stage 1 from
+`teach-headspin_launch-e743c8-s4`, using 750k steps per stage and
+`launch_spin=32`. Deterministic unassisted evaluation must use the final `s4`
+policy and the revised four-turn evaluation horizon before any success claim.
+
+That chain was followed by a 1.5M-step, final-stage-only fine-tune named
+`teach-headspin_launch-9406bd`. Across deterministic seeds 300–319 from
+motionless standing starts with no yaw assist, 11/20 runs exceeded one
+continuous head-and-trunk turn, 1/20 exceeded two, and the best reached 2.110
+turns. Median turns were 1.253; median supported peak speed was 7.137 rad/s.
+Only 2/20 runs had foot-launch quality at least 0.5, so this result demonstrates
+more rotation under the simulator proxy, not reliable foot-dominant launch.
+Visual rollout inspection is still required.

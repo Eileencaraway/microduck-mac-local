@@ -919,8 +919,9 @@ _register(replace(
 # A separate experiment.  Curriculum-only inverted starts may receive a yaw
 # kick so the policy can first learn to KEEP a head-supported turn.  The final
 # stage and deterministic evaluation remain standing-only with zero kick.
-_LAUNCH_TURNS = 1.0
-_LAUNCH_RATE = 4.0                 # rad/s; experimental target, not measured ability
+_LAUNCH_TURNS = 4.0
+_LAUNCH_SUCCESS_TURNS = 1.0
+_LAUNCH_RATE = 5.0                 # rad/s; fast-spin target, not measured ability
 _LAUNCH_LZ = 0.015                # kg m^2/s; launch shaping reference
 
 
@@ -974,6 +975,7 @@ def _launch_reset(env):
     env._ls_phase = 1 if env.last_spawn == 'inverted' and assisted else 0
     env._ls_time = env._ls_turn = env._ls_head_turn = 0.0
     env._ls_quality = env._ls_takeoff_lz = env._ls_peak_lz = 0.0
+    env._ls_peak_rate = 0.0
     env._ls_launch_gain = env._ls_spin_gain = 0.0
     env._ls_gap = env._ls_settled = 0.0
     env._ls_foot_impulse = 0.0
@@ -1018,13 +1020,17 @@ def _launch_update(env):
         if _headspin_supported(env):
             env._ls_gap = 0.0
             old = min(env._ls_turn, env._ls_head_turn)
-            env._ls_turn += _headspin_world_rate(env) * C.CTRL_DT
+            rate = _headspin_world_rate(env)
+            env._ls_peak_rate = max(env._ls_peak_rate, rate)
+            env._ls_turn += rate * C.CTRL_DT
             mujoco.mj_objectVelocity(env.model, env.data, mujoco.mjtObj.mjOBJ_BODY,
                                     env._ls_head_id, env._ls_head_velocity, 0)
             env._ls_head_turn += float(env._ls_head_velocity[2]) * C.CTRL_DT
             # Both HEAD and TRUNK must rotate: neck-only twisting cannot finish.
             new = min(env._ls_turn, env._ls_head_turn)
             env._ls_spin_gain = float(np.clip((new - old) / (_LAUNCH_RATE * C.CTRL_DT), -1, 1))
+            if new >= _LAUNCH_SUCCESS_TURNS * 2 * np.pi:
+                env._ls_success = True
             if new >= env._ls_target_turns * 2 * np.pi:
                 env._ls_phase = 2
         else:
@@ -1034,12 +1040,10 @@ def _launch_update(env):
         if env._ls_time > 10.0:
             env._ls_phase = 2
     if env._ls_phase == 2:
-        flat = abs(float(env._projected_gravity()[2])) < 0.35
-        quiet = float(np.linalg.norm(env._gyro)) < 0.5
-        grounded = _body_floor_contacts(env) > 0
-        env._ls_settled = env._ls_settled + C.CTRL_DT if flat and quiet and grounded else 0.0
-        env._ls_success = (min(env._ls_turn, env._ls_head_turn) >= env._ls_target_turns * 2 * np.pi
-                           and env._ls_quality >= 0.5 and env._ls_settled >= 0.5)
+        # Recovery pose is deliberately unconstrained.  One legitimate,
+        # continuous turn is success; reaching two to four turns earns more
+        # dense rotation reward before this phase begins.
+        env._ls_settled = 0.0
     env._ls_prev_lz, env._ls_prev_feet = lz, feet
 
 
@@ -1069,7 +1073,12 @@ def _launch_push(env):
 
 
 def _launch_spin(env):
-    return env._ls_quality * env._ls_spin_gain
+    # Later turns are worth progressively more, so the easy one-turn solution
+    # remains a success but is not the reward optimum.  The multiplier reaches
+    # 2x during the fourth turn and never pays without new positive rotation.
+    turns = max(0.0, min(env._ls_turn, env._ls_head_turn) / (2 * np.pi))
+    multiplier = 1.0 + min(turns, 3.0) / 3.0
+    return env._ls_quality * env._ls_spin_gain * multiplier
 
 
 def _launch_balance(env):
@@ -1078,42 +1087,34 @@ def _launch_balance(env):
     return _headstand_hold_raw(env) * env._ls_quality
 
 
-def _launch_settle(env):
-    if env._ls_phase != 2:
-        return 0.0
-    progress = float(np.clip(min(env._ls_turn, env._ls_head_turn) / (env._ls_target_turns * 2 * np.pi), 0, 1))
-    flat = max(0, 1 - abs(float(env._projected_gravity()[2])))
-    calm = float(np.exp(-float(np.dot(env._gyro, env._gyro))))
-    return progress * env._ls_quality * flat * calm * float(_body_floor_contacts(env) > 0)
-
-
 def _launch_overspeed(env):
-    return -min(1, max(0, abs(_headspin_world_rate(env)) - 7.0) ** 2)
+    return -min(1, max(0, abs(_headspin_world_rate(env)) - 8.0) ** 2)
 
 
 def _launch_caption(env):
     phase = ('push', 'spin', 'recover')[getattr(env, '_ls_phase', 0)]
     turns = min(getattr(env, '_ls_turn', 0), getattr(env, '_ls_head_turn', 0)) / (2 * np.pi)
     target = getattr(env, '_ls_target_turns', _LAUNCH_TURNS)
-    return f'{phase}: {turns:.2f}/{target:g} turns; foot launch {getattr(env, "_ls_takeoff_lz", 0):.4f} kg m2/s'
+    return (f'{phase}: {turns:.2f}/{target:g} turns; '
+            f'peak {getattr(env, "_ls_peak_rate", 0):.2f} rad/s; '
+            f'foot launch {getattr(env, "_ls_takeoff_lz", 0):.4f} kg m2/s')
 
 
 def _launch_report(env):
-    return [_launch_caption(env), f'proxy_success={env._ls_success}; settled={env._ls_settled:.2f}s',
+    return [_launch_caption(env), f'proxy_success_1plus_turn={env._ls_success}',
             'No externally injected spin. Head/trunk world-up gyro integrals are proxies; verify video.']
 
 
 _register(replace(
     BEHAVIORS['headstand'], id='headspin_launch', emoji='🌀', title='Foot-driven headspin',
-    description='Push and twist from the feet, spin on the head, then settle lying down.',
-    how_it_learns='Warm-starts from the trained headspin. Reverse curriculum first preserves a short assisted turn, then removes the assist and finishes from a motionless standing start. Experimental: success has not been demonstrated.',
+    description='Push and twist from the feet, then carry a fast headspin for one to four turns.',
+    how_it_learns='Warm-starts from the trained headspin. One continuous foot-launched turn is success; faster second through fourth turns earn more. The reverse curriculum removes the yaw assist and finishes from a motionless standing start. Experimental: success has not been demonstrated.',
     keywords=('headspin_launch', 'foot-driven headspin', '撑地启动头转', '撑地头转'),
     terms=tuple(replace(t, fn=_launch_entry_term(t.fn)) for t in BEHAVIORS['headstand'].terms) + (
         RewardTerm('launch_push', 'Build initial rotation while the feet still push on the floor', 24.0, _launch_push),
-        RewardTerm('launch_spin', 'Carry launch momentum through the requested head-supported turn', 24.0, _launch_spin),
+        RewardTerm('launch_spin', 'Carry fast launch momentum through one to four head-supported turns; later turns pay more', 32.0, _launch_spin),
         RewardTerm('launch_balance', 'Keep the headstand while rotating after the launch', 8.0, _launch_balance),
-        RewardTerm('launch_settle', 'After rotating, slow down and settle lying flat', 12.0, _launch_settle),
-        RewardTerm('launch_overspeed', 'Penalty for excessive rotation above 7 rad/s', 2.0, _launch_overspeed, is_penalty=True),
+        RewardTerm('launch_overspeed', 'Penalty for excessive rotation above 8 rad/s', 2.0, _launch_overspeed, is_penalty=True),
     ),
     warm_start_behavior='headspin', symmetric=False, default_steps=3_000_000,
     episode_s=10.0, inverted_spawn_prob=0.0, mid_flip_spawn_prob=0.0,
@@ -1129,20 +1130,20 @@ _register(replace(
             'MICRODUCK_HS_GATE': '0.8', 'MICRODUCK_EPISODE_S': episode,
         }, detail=detail)
         for label, inv, mid, entry_kick, yaw_kick, turns, episode, detail in (
-            ('preserve a quarter-turn from head support', '0.85', '0.10', '0.05', '1.5', '0.25', '8',
-             'Start from the trained headspin pose with a visible yaw kick; retain balance for one quarter-turn.'),
-            ('carry a half-turn through entry', '0.65', '0.25', '0.10', '1.0', '0.5', '8',
-             'Reduce the yaw assist and add more mid-entry and standing starts; target one half-turn.'),
-            ('transfer three-quarter-turn momentum', '0.30', '0.30', '0.10', '0.5', '0.75', '10',
-             'Standing starts become the largest group while the remaining assisted starts preserve the spin skill.'),
-            ('motionless foot launch for one turn', '0', '0', '0', '0', '1.0', '10',
-             'Final stage starts motionless on the feet with no injected yaw or inverted spawn.'),
+            ('preserve a fast half-turn from head support', '0.85', '0.10', '0.05', '1.5', '0.5', '8',
+             'Start from the trained headspin pose with a visible yaw kick; retain a fast half-turn.'),
+            ('carry one successful turn through entry', '0.65', '0.25', '0.10', '1.0', '1.0', '9',
+             'Reduce the yaw assist and learn the one-turn success threshold.'),
+            ('extend launch momentum through two turns', '0.30', '0.30', '0.10', '0.5', '2.0', '10',
+             'Standing starts become the largest group while later turns earn progressively more.'),
+            ('motionless foot launch for four turns', '0', '0', '0', '0', '4.0', '12',
+             'Final stage starts motionless on the feet with no injected yaw; one turn succeeds and two to four are preferred.'),
         )
     ),
     spawn_families=(), spotter_fn=None,
     state_fn=_launch_update, reset_fn=_launch_reset, obs_fn=_launch_obs,
     caption_fn=_launch_caption, report_fn=_launch_report,
-    success_metric='standing start, positive foot-contact launch momentum, one continuous head AND trunk turn, then 0.5 seconds settled lying down',
+    success_metric='standing start and at least one continuous head AND trunk turn; foot-launch quality is reported separately, and two to four fast turns are preferred',
 ))
 
 

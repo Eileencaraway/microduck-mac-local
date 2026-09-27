@@ -18,8 +18,8 @@ def main():
     knobs = {'MICRODUCK_ACTUATOR': 'bam', 'MICRODUCK_BAM_CURRENT_SCALE': '1.0',
              'MICRODUCK_INVERTED_SPAWN_PROB': '0', 'MICRODUCK_MID_FLIP_SPAWN_PROB': '0',
              'MICRODUCK_INV_SPAWN_KICK': '0', 'MICRODUCK_HS_GATE': '0.8',
-             'MICRODUCK_LAUNCH_YAW_KICK': '0', 'MICRODUCK_LAUNCH_TURNS': '1',
-             'MICRODUCK_LAUNCH_SUPPORT_GAP': '0.6', 'MICRODUCK_EPISODE_S': '10'}
+             'MICRODUCK_LAUNCH_YAW_KICK': '0', 'MICRODUCK_LAUNCH_TURNS': '4',
+             'MICRODUCK_LAUNCH_SUPPORT_GAP': '0.6', 'MICRODUCK_EPISODE_S': '12'}
     for seed in range(args.seed0, args.seed0 + args.seeds):
         env = build_env('headspin_launch', knobs, seed)
         try:
@@ -27,7 +27,7 @@ def main():
             initial_lz = _launch_lz(env)
             trace = []
             success = False
-            for step in range(600):
+            for step in range(700):
                 obs, reward, done, truncated, _ = env.step(driver.fn(obs, env))
                 success |= env._ls_success
                 if step % 10 == 0 or done or truncated:
@@ -43,6 +43,7 @@ def main():
                    'foot_impulse_proxy': env._ls_foot_impulse,
                    'trunk_turns': env._ls_turn / 6.283185307179586,
                    'head_turns': env._ls_head_turn / 6.283185307179586,
+                   'peak_supported_rate': env._ls_peak_rate,
                    'settled_s_at_end': env._ls_settled,
                    'proxy_success': success, 'trace': trace}
             rows.append(row)

@@ -8,7 +8,8 @@ This branch adds two experimental reinforcement-learning behaviors to
 - `headspin`: enter a headstand and learn a directed, visible rotation while
   supported on the head.
 - `headspin_launch`: build yaw momentum from a standing start, transition to
-  head support, rotate for a finite target, then attempt to settle.
+  head support, and sustain a fast one-to-four-turn spin. One continuous turn
+  counts as success; the second through fourth turns earn progressively more.
 
 ## Status
 
@@ -22,6 +23,7 @@ The current results do not demonstrate a reliable full headspin:
 | --- | --- | --- |
 | `teach-headspin-f95723` | 3 standing + 3 inverted starts | 0/6 uninterrupted full turns; best observed proxy angle about 225° |
 | `teach-headspin_launch-e743c8-s4` | 6 motionless standing starts, no yaw assist | 0/6 complete launch-turn-settle successes; best trunk/head proxy rotation about 0.38/0.54 turns |
+| `teach-headspin_launch-9406bd` | 20 motionless standing starts, no yaw assist | 11/20 exceeded one continuous turn; 1/20 exceeded two; best head-and-trunk proxy 2.11 turns |
 
 These are contact- and angular-rate-based simulation proxies. Visual rollout
 review is still required. The launch experiment also exposed a limitation in
